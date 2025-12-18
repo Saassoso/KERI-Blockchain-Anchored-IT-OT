@@ -97,4 +97,11 @@ Expected output:
 
 
 
+## Or you can just — Use the Provided Virtual Environment from GitHub
 
+The `keri-env` virtual environment has already been created and pushed to this repository.  
+After cloning the repo, you can activate it directly:
+
+```powershell
+.\keri-env\Scripts\Activate.ps1
+```
