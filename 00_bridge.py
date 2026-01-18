@@ -58,7 +58,8 @@ def main():
         logging.info("="*60)
         
         last_seq = -1
-        anchor_file = "blockchain_anchor_drone_sensor_1.json"
+        #anchor_file = "blockchain_anchor_drone_sensor_1.json"
+        anchor_file = "blockchain_anchor_gateway.json"
 
         while True:
             # DEBUG 1: Does file exist?
