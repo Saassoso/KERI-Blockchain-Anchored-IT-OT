@@ -5,6 +5,7 @@ import os
 import paho.mqtt.client as mqtt
 from scripts.utils import load_libsodium
 
+<<<<<<< Updated upstream
 # 1. Load Crypto Libs
 load_libsodium()
 import pysodium
@@ -62,6 +63,66 @@ if st.sidebar.button("✅ CLOSE BREAKER (RESTORE)"):
 
 # --- MAIN DISPLAY (VISUALIZATION) ---
 col1, col2, col3 = st.columns(3)
+=======
+# --- CONFIG ---
+load_dotenv(find_dotenv(usecwd=True))
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+SCADA_PRIVATE_KEY_HEX = os.getenv("SCADA_PRIVATE_KEY_HEX")
+ANCHOR_FILE = "dashboard_data.json"
+
+# --- LIBSODIUM ---
+def load_crypto():
+    lib = ctypes.util.find_library('sodium') or ctypes.util.find_library('libsodium')
+    if not lib: lib = ctypes.util.find_library('libsodium.dll')
+    return ctypes.cdll.LoadLibrary(lib) if lib else None
+_sodium = load_crypto()
+
+st.set_page_config(page_title="Fortress NOC", layout="wide", page_icon="🏢")
+st.title("🏢 Fortress-1 Data Center NOC")
+
+# --- SESSION STATE (FOR GRAPH) ---
+if "temp_history" not in st.session_state:
+    st.session_state.temp_history = []
+
+# --- COMMANDS ---
+def send_command(cmd):
+    if not _sodium: return
+    try:
+        sig = ctypes.create_string_buffer(64)
+        _sodium.crypto_sign_detached(sig, None, cmd.encode('utf-8'), ctypes.c_ulonglong(len(cmd)), bytes.fromhex(SCADA_PRIVATE_KEY_HEX))
+        payload = {"cmd": cmd, "sig": sig.raw.hex(), "ts": time.time()}
+        
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.connect(MQTT_BROKER, 1883, 60)
+        
+        # FIX: Wait for publish confirmation
+        info = client.publish("substation/control/breaker", json.dumps(payload))
+        info.wait_for_publish()
+        
+        client.disconnect()
+        return True
+    except Exception as e:
+        st.error(f"Command Error: {e}")
+        return False
+
+# --- SIDEBAR CONTROLS ---
+st.sidebar.header("🔐 Admin Controls")
+if st.sidebar.button("🚨 EMERGENCY SHUTDOWN", type="primary"):
+    send_command("OPEN_BREAKER")
+    st.toast("🔥 Shutdown Command Sent")
+
+if st.sidebar.button("✅ RESTORE OPERATIONS"):
+    send_command("CLOSE_BREAKER")
+    st.toast("✅ Restore Command Sent")
+
+st.sidebar.divider()
+if st.sidebar.button("🔓 UNLOCK DOOR (Manual)"):
+    send_command("OPEN_DOOR")
+    st.toast("🔓 Door Unlock Command Sent")
+
+# --- MONITORING LOOP ---
+placeholder = st.empty()
+>>>>>>> Stashed changes
 
 # Placeholder for metrics
 voltage_metric = col1.empty()
@@ -77,6 +138,7 @@ if "voltage_history" not in st.session_state:
 # --- AUTO-REFRESH LOOP ---
 # This simulates a real-time dashboard update
 while True:
+<<<<<<< Updated upstream
     try:
         if os.path.exists(ANCHOR_FILE):
             with open(ANCHOR_FILE, "r") as f:
@@ -107,3 +169,63 @@ while True:
         status_metric.error("Read Error")
     
     time.sleep(1) # Refresh every second
+=======
+    data = {}
+    try:
+        with open(ANCHOR_FILE, "r") as f: data = json.load(f)
+    except: pass
+    
+    with placeholder.container():
+        c1, c2, c3 = st.columns(3)
+        current_temp = 0.0 # Default if no data
+        
+        if data:
+            for aid, d in data.items():
+                val = str(d.get('val', ''))
+                
+                # PARSE SERVER DATA (CPU & TEMP)
+                if "CPU" in val: 
+                    # Format: "CPU:45%|Temp:50.5C"
+                    try:
+                        parts = val.split('|')
+                        cpu_txt = parts[0]
+                        temp_txt = parts[1]
+                        
+                        # Extract float for graph
+                        current_temp = float(temp_txt.replace('Temp:', '').replace('C', ''))
+                        
+                        c1.metric("🖥️ Server Core", cpu_txt, temp_txt)
+                    except: pass
+                    
+                # PARSE HVAC DATA
+                elif "FAN" in val: 
+                    c2.metric("❄️ HVAC Status", val.split('|')[0], f"SN: {d['sn']}")
+                    
+                # PARSE DOOR DATA
+                elif "LOCKED" in val or "UNLOCKED" in val: 
+                    c3.metric("🚪 Physical Access", val.split('|')[0], val.split('|')[1])
+        else:
+            st.info("Waiting for Data...")
+        
+        # --- THE GRAPH (RESTORED) ---
+        st.divider()
+        st.subheader("🔥 Live Server Temperature")
+        
+        # Append data
+        st.session_state.temp_history.append(current_temp)
+        
+        # Keep graph moving (last 100 ticks)
+        if len(st.session_state.temp_history) > 100:
+            st.session_state.temp_history.pop(0)
+            
+        # Dynamic Color: Red if hot, Blue if cool
+        chart_color = "#ff0000" if current_temp > 80 else "#0000ff"
+        st.line_chart(st.session_state.temp_history, color=chart_color)
+
+        # --- AUDIT TABLE ---
+        if data: 
+            st.caption("Immutable Blockchain Log")
+            st.dataframe(pd.DataFrame.from_dict(data, orient='index'))
+            
+    time.sleep(1)
+>>>>>>> Stashed changes

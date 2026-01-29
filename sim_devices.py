@@ -2,10 +2,14 @@ import time
 import json
 import random
 import os
+<<<<<<< Updated upstream
 import sys
 import ctypes
 import hashlib
+=======
+>>>>>>> Stashed changes
 import base64
+import ctypes
 import threading
 import paho.mqtt.client as mqtt
 from ctypes.util import find_library
@@ -64,9 +68,15 @@ class KeriController:
                 self.sk = bytes.fromhex(data["sk"])
                 self.next_pk = bytes.fromhex(data["next_pk"]) # Pre-Rotation
                 self.aid = data["aid"]
+<<<<<<< Updated upstream
                 print(f"[{self.alias}] Loaded Identity: {self.aid}")
         else:
             print(f"[{self.alias}] ⚙️ Generating New KERI Identity...")
+=======
+                print(f"[{self.alias}]  Identity Loaded: {self.aid}")
+        else:
+            print(f"[{self.alias}]  Provisioning Identity...")
+>>>>>>> Stashed changes
             self.pk, self.sk = generate_keypair()
             self.next_pk, _ = generate_keypair() # Generate Next Key (Pre-Rotation)
             
@@ -117,6 +127,7 @@ class KeriController:
         # Payload Format: AID|Value|Sequence|Timestamp
         payload = f"{self.aid}|{val}|{sn}|{timestamp}"
         sig_raw = sign_data(payload, self.sk)
+<<<<<<< Updated upstream
         
         packet = {
             "type": "telemetry",
@@ -124,6 +135,15 @@ class KeriController:
             "sig": to_cesr(sig_raw, "0B") # CESR Signature
         }
         return packet
+=======
+        return {"type": "telemetry", "payload": payload, "sig": to_cesr(sig_raw, "0B")}
+
+# --- 3. SHARED PHYSICS STATE ---
+# Global flags affecting all threads
+SYSTEM_LOCKDOWN = False
+HVAC_RUNNING = True
+SECURITY_IMMUNITY = 0 # Counter to block attacks after admin command
+>>>>>>> Stashed changes
 
 # ==========================================
 #  VIRTUAL DEVICE (Network & Physics Layer)
@@ -134,6 +154,7 @@ class VirtualDevice:
         self.device_type = device_type
         self.keri = KeriController(name)
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=name)
+<<<<<<< Updated upstream
         self.sn = 0 # Monotonic Sequence Number
 
     def start(self):
@@ -146,6 +167,49 @@ class VirtualDevice:
 
         # STEP 1: BOOTSTRAP (Send Inception Event)
         print(f"[{self.name}]  Broadcasting Inception Event (Bootstrap)...")
+=======
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.sn = 0
+        
+        # Physics State
+        self.cpu_load = 30.0 
+        self.temp = 35.0     
+        self.fan_rpm = 4000
+
+    def on_connect(self, client, userdata, flags, rc, properties=None):
+        client.subscribe("control/broadcast")
+
+    def on_message(self, client, userdata, msg):
+        global SYSTEM_LOCKDOWN, HVAC_RUNNING, SECURITY_IMMUNITY
+        try:
+            payload = json.loads(msg.payload.decode())
+            if "cmd" in payload:
+                cmd = payload["cmd"]
+                
+                # --- COMMAND: LOCKDOWN (Kill Switch) ---
+                if cmd == "OPEN_BREAKER": 
+                    print(f"\n[{self.name}]  COMMAND RECEIVED: INITIATING LOCKDOWN!\n")
+                    SYSTEM_LOCKDOWN = True
+                    SECURITY_IMMUNITY = 30 # Grant 30 ticks of immunity
+                    if self.device_type == "HVAC": HVAC_RUNNING = True 
+
+                # --- COMMAND: RESTORE (Reset) ---
+                elif cmd == "CLOSE_BREAKER":
+                    print(f"\n[{self.name}]  COMMAND RECEIVED: RESTORING OPERATIONS.\n")
+                    SYSTEM_LOCKDOWN = False
+                    SECURITY_IMMUNITY = 30 # Grant 30 ticks of immunity
+                    if self.device_type == "HVAC": HVAC_RUNNING = True
+        except: pass
+
+    def start(self):
+        global HVAC_RUNNING, SYSTEM_LOCKDOWN, SECURITY_IMMUNITY
+        
+        self.client.connect("localhost", 1883, 60)
+        self.client.loop_start()
+        
+        # KERI BOOTSTRAP
+>>>>>>> Stashed changes
         event, sig = self.keri.make_inception_event()
         bootstrap_packet = {
             "type": "icp",
@@ -158,13 +222,27 @@ class VirtualDevice:
         # STEP 2: MAIN LOOP (Telemetry)
         while True:
             self.sn += 1
+            if SECURITY_IMMUNITY > 0: SECURITY_IMMUNITY -= 1 # Countdown immunity
+            
             payload_val = ""
+<<<<<<< Updated upstream
 
             # --- PHYSICS ENGINE & ATTACK SIMULATION ---
             if self.device_type == "TEMP":
                 # Normal: 20-25C.
                 base_temp = 22.0
                 noise = random.uniform(-0.5, 0.5)
+=======
+            
+            # === PHYSICS ENGINE ===
+            
+            if self.device_type == "SERVER":
+                # 1. Determine Load
+                if SYSTEM_LOCKDOWN:
+                    target_load = 5.0 # Idle
+                else:
+                    target_load = 65.0 # Normal
+>>>>>>> Stashed changes
                 
                 # == ATTACK SIMULATION ==
                 # Every 10th packet, try to REPLAY an old sequence number (Attack)
@@ -178,6 +256,7 @@ class VirtualDevice:
                 val = round(base_temp + noise, 2)
                 payload_val = f"{val}C"
 
+<<<<<<< Updated upstream
             elif self.device_type == "PDU":
                 # Power Distribution Unit
                 val = round(230.0 + random.uniform(-1, 1), 1)
@@ -187,11 +266,60 @@ class VirtualDevice:
                 # Access Control
                 state = "CLOSED" if random.random() > 0.1 else "OPEN"
                 payload_val = state
+=======
+                # 3. Cooling
+                if HVAC_RUNNING:
+                    cooling_power = (self.temp - 20.0) * 0.05 
+                else:
+                    cooling_power = (self.temp - 20.0) * 0.005 
+
+                # 4. Apply Physics
+                self.temp = self.temp + heat_gen - cooling_power
+                self.temp = max(20.0, self.temp)
+
+                payload_val = f"CPU:{int(self.cpu_load)}%|Temp:{round(self.temp, 1)}C"
+
+            elif self.device_type == "HVAC":
+                # Attack Logic: Every 25 ticks
+                is_attack_window = (self.sn > 20 and self.sn % 25 < 10) 
+                
+                # Only Attack if NO Immunity and NOT Lockdown
+                is_attack_active = is_attack_window and not SYSTEM_LOCKDOWN and SECURITY_IMMUNITY == 0
+
+                if is_attack_active:
+                    HVAC_RUNNING = False 
+                    self.fan_rpm = 0 
+                    print(f"[{self.name}]  ATTACK: COOLING DISABLED (Spoofing Normal)...")
+                    
+                    fake_payload = "FAN:5000RPM|PWR:Normal"
+                    packet = self.keri.sign_telemetry(fake_payload, 5) 
+                    self.client.publish(f"telemetry/{self.name}", json.dumps(packet))
+                    time.sleep(3)
+                    continue 
+                    
+                else:
+                    # Normal Operation (or Immunity Active)
+                    HVAC_RUNNING = True
+                    self.fan_rpm = int(4500 + random.uniform(-100, 100))
+
+                payload_val = f"FAN:{self.fan_rpm}RPM|PWR:Active"
+
+            elif self.device_type == "DOOR":
+                if SYSTEM_LOCKDOWN:
+                    state = "LOCKED" 
+                elif self.temp > 95.0: # Raised threshold slightly
+                    state = "UNLOCKED" # Fire Risk!
+                else:
+                    state = "LOCKED"
+                    
+                payload_val = f"{state}|Log:Secure"
+>>>>>>> Stashed changes
 
             # --- SIGN & SEND ---
             packet = self.keri.sign_telemetry(payload_val, self.sn)
             self.client.publish(f"telemetry/{self.name}", json.dumps(packet))
             
+<<<<<<< Updated upstream
             print(f"[{self.name}] 📤 Sent {payload_val} | sn:{self.sn} | 🔏 Sig:{packet['sig'][:10]}...")
             time.sleep(3)
 
@@ -210,3 +338,20 @@ if __name__ == "__main__":
     t1.start()
     t2.start()
     t3.start()
+=======
+            # Console Status
+            status = "❄️" if HVAC_RUNNING else "🔥"
+            if self.device_type == "SERVER":
+                print(f"[{self.name}] {status} Temp:{round(self.temp,1)}C | Load:{int(self.cpu_load)}%")
+            else:
+                print(f"[{self.name}]  {payload_val} | sn:{self.sn}")
+            
+            time.sleep(3)
+
+if __name__ == "__main__":
+    print("---  STARTING FORTRESS-1 PHYSICS SIMULATION ---")
+    t1 = threading.Thread(target=VirtualDevice("RACK-99-CORE", "SERVER").start)
+    t2 = threading.Thread(target=VirtualDevice("HVAC-MASTER", "HVAC").start)
+    t3 = threading.Thread(target=VirtualDevice("BIO-MANTRAP", "DOOR").start)
+    t1.start(); t2.start(); t3.start()
+>>>>>>> Stashed changes
