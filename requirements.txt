@@ -6,6 +6,7 @@ git+https://github.com/WebOfTrust/keripy.git
 
 # Cryptographic library for libsodium bindings
 pysodium>=0.7.18
+paho-mqtt
 
 # Note: The following dependencies are automatically installed with keripy:
 # - lmdb>=1.7.3 (Lightning Memory-Mapped Database)

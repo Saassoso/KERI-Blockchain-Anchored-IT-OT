@@ -1,144 +1,148 @@
 import json
 import time
-import logging
+import base64
+import ctypes
+from ctypes.util import find_library
 import paho.mqtt.client as mqtt
-from scripts.utils import load_libsodium
-import os
 
-# 1. Load Libsodium FIRST (Critical for Windows)
-load_libsodium()
+# ==========================================
+#  GATEWAY CRYPTO (Verifier)
+# ==========================================
+def load_crypto():
+    lib = ctypes.util.find_library('sodium') or ctypes.util.find_library('libsodium')
+    if not lib:
+        lib = ctypes.util.find_library('libsodium.dll') or ctypes.util.find_library('libsodium.so')
+    return ctypes.cdll.LoadLibrary(lib)
 
-# 2. NOW import the libraries that rely on it
-import pysodium 
-from keri.app import habbing
+_sodium = load_crypto()
 
-# CONFIG
-MQTT_BROKER = "localhost"
-MQTT_TOPIC = "substation/#"
-ANCHOR_FILE = "blockchain_anchor_gateway.json"
+def from_cesr_key(cesr_key):
+    """ Extracts raw bytes from CESR Key (Drops 'D' prefix) """
+    if cesr_key.startswith("D"):
+        try:
+            return base64.urlsafe_b64decode(cesr_key[1:] + "==")
+        except:
+            return None
+    return None
 
-# --- PASTE YOUR GENERATED PUBLIC KEY HERE ---
-SCADA_PUBLIC_KEY_HEX = "e7da49932640a662a61cca5affafb16cfa523edb9e0e8bf64e8b293a49e1e1ea"
+def from_cesr_sig(cesr_sig):
+    """ Extracts raw bytes from CESR Sig (Drops '0B' prefix) """
+    if cesr_sig.startswith("0B"):
+        try:
+            return base64.urlsafe_b64decode(cesr_sig[2:] + "==")
+        except:
+            return None
+    return None
 
-KNOWN_DEVICES = {
-    "ESP32_SENSOR_A": "SECRET_TOKEN_123",
-    "ESP32_RELAY_B":  "SECRET_TOKEN_456"
-}
+def verify_ed25519(pk_raw, msg, sig_raw):
+    msg_bytes = msg.encode('utf-8')
+    if len(sig_raw) != 64: return False
+    try:
+        rc = _sodium.crypto_sign_verify_detached(
+            sig_raw, 
+            msg_bytes, 
+            ctypes.c_ulonglong(len(msg_bytes)), 
+            pk_raw
+        )
+        return rc == 0
+    except:
+        return False
 
+# ==========================================
+#  GATEWAY LOGIC (Witness/Guardian)
+# ==========================================
 class SecureGateway:
     def __init__(self):
-        self.name = "Gateway_Phy_1"
-        self.db_name = "keri_gateway_db"
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - [GATEWAY] - %(message)s')
+        # Local KEL Registry
+        # { "AID": { "pk": bytes, "last_sn": 0, "status": "ACTIVE" } }
+        self.kel_registry = {} 
         
-        self.hby = habbing.Habery(name="controller", base=self.db_name)
-        self.hab = self.setup_identity()
-        self.cycle_count = 0  
-
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="Gateway")
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
-    def setup_identity(self):
-        hab = self.hby.habByName(name=self.name)
-        if hab is None:
-            hab = self.hby.makeHab(name=self.name, isith="1", icount=1)
-            logging.info(f"Created KERI AID: {hab.pre}")
-        else:
-            logging.info(f"Loaded KERI AID: {hab.pre}")
-        return hab
+    def start(self):
+        print("🛡️  GATEWAY ONLINE. Waiting for KERI Bootstraps...")
+        self.client.connect("localhost", 1883, 60)
+        self.client.loop_forever()
 
     def on_connect(self, client, userdata, flags, rc, properties=None):
-        logging.info("Connected to MQTT Broker")
-        client.subscribe("substation/#")
-
-    def check_rotation(self):
-        self.cycle_count += 1
-        if self.cycle_count >= 10:
-            logging.info("Initiating KERI Key Rotation...")
-            self.hab.rotate()
-            logging.info(f"Keys Rotated! New Sequence: {self.hab.kever.sn}")
-            self.cycle_count = 0
-
-    def verify_scada_command(self, payload):
-        try:
-            command = payload.get("cmd")
-            signature_hex = payload.get("sig")
-            
-            pysodium.crypto_sign_verify_detached(
-                bytes.fromhex(signature_hex),
-                command.encode('utf-8'),
-                bytes.fromhex(SCADA_PUBLIC_KEY_HEX)
-            )
-            logging.info(f"SCADA Signature Verified for: {command}")
-            return True
-        except Exception as e:
-            logging.error(f"INVALID SIGNATURE! Command Rejected: {e}")
-            return False
+        client.subscribe("keri/bootstrap")  # Listen for Inceptions
+        client.subscribe("telemetry/#")     # Listen for Data
 
     def on_message(self, client, userdata, msg):
         try:
-            payload = json.loads(msg.payload.decode())
+            packet = json.loads(msg.payload.decode())
+            topic = msg.topic
             
-            if "cmd" in payload:
-                if self.verify_scada_command(payload):
-                    print(f"EXECUTING: {payload['cmd']}")
-                return
-
-            clean_data = {k: v for k, v in payload.items() if k != 'token'}
-            self.hab.interact(data=[clean_data])
-            self.export_anchor(clean_data)
-            
-            self.check_rotation()
-        except Exception as e:
-            logging.error(f"Message processing error: {e}")
-
-    def export_anchor(self, data):
-        try:
-            log = list(self.hab.db.clonePreIter(pre=self.hab.pre, fn=0))
-            if not log:
-                return
-
-            raw_event = bytes(log[-1])
-            event_str = raw_event.decode('utf-8')
-
-            import json
-            header = None
-            for i in range(len(event_str)):
-                try:
-                    candidate = event_str[:i+1]
-                    header = json.loads(candidate)
-                    break 
-                except json.JSONDecodeError:
-                    continue
-            
-            if not header:
-                header = json.loads(event_str)
-
-            anchor = {
-                "aid": self.hab.pre,
-                "seq": int(header['s'], 16),
-                "said": header['d'],
-                "data_snapshot": data
-            }
-            
-            temp_file = f"{ANCHOR_FILE}.tmp"
-            with open(temp_file, "w") as f:
-                json.dump(anchor, f, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
-
-            os.replace(temp_file, ANCHOR_FILE)
-            logging.info(f"⚓ Anchor File Updated (Seq {anchor['seq']})")
+            if topic == "keri/bootstrap":
+                self.handle_inception(packet)
+            elif "telemetry" in topic:
+                self.handle_telemetry(packet)
                 
         except Exception as e:
-            logging.error(f"Export Failed: {e}")
+            print(f" Error processing packet: {e}")
 
-    def run(self):
-        logging.info("🚀 Gateway Active. Listening for sensors...")
-        self.client.connect(MQTT_BROKER, 1883, 60)
-        self.client.loop_forever()
+    def handle_inception(self, packet):
+        """ Handles 'icp' events (Trust On First Use) """
+        event = packet["event"]
+        sig_cesr = packet["sig"]
+        aid = event["i"]
+        
+        if aid in self.kel_registry:
+            # In a real system, we'd check for Key Rotation here
+            return 
+
+        # 1. Get Public Key from Event
+        pk_cesr = event["k"][0] 
+        pk_raw = from_cesr_key(pk_cesr)
+        
+        # 2. Verify Self-Signature
+        raw_event = json.dumps(event, sort_keys=True)
+        sig_raw = from_cesr_sig(sig_cesr)
+        
+        if verify_ed25519(pk_raw, raw_event, sig_raw):
+            print(f" INCEPTION VALIDATED. New AID Registered: {aid}")
+            self.kel_registry[aid] = {
+                "pk": pk_raw,
+                "last_sn": 0,
+                "status": "ACTIVE"
+            }
+        else:
+            print(f" INCEPTION FAILED: Invalid Signature for {aid}")
+
+    def handle_telemetry(self, packet):
+        """ Handles Data Packets (Verifies against Local KEL) """
+        payload = packet["payload"] # Format: AID|Val|SN|TS
+        sig_cesr = packet["sig"]
+        
+        parts = payload.split("|")
+        aid = parts[0]
+        sn = int(parts[2])
+        val = parts[1]
+        
+        # 1. Check Registration
+        if aid not in self.kel_registry:
+            print(f" UNKNOWN DEVICE: {aid}. Waiting for Bootstrap...")
+            return
+
+        device = self.kel_registry[aid]
+
+        # 2. Anti-Replay Check
+        if sn <= device["last_sn"]:
+            print(f"  REPLAY ATTACK BLOCKED for {aid}: sn {sn} <= {device['last_sn']}")
+            return
+
+        # 3. Verify Signature using STORED Key
+        pk_raw = device["pk"]
+        sig_raw = from_cesr_sig(sig_cesr)
+        
+        if verify_ed25519(pk_raw, payload, sig_raw):
+            print(f" VERIFIED: {aid[:8]}... | {val} | Anchoring...")
+            device["last_sn"] = sn # Update Sequence State
+        else:
+            print(f" SECURITY ALERT: Invalid Signature from {aid}")
 
 if __name__ == "__main__":
     gw = SecureGateway()
-    gw.run()
+    gw.start()
