@@ -2,19 +2,19 @@ import time
 import json
 import random
 import os
-import sys
 import ctypes
-import hashlib
 import base64
 import threading
 import paho.mqtt.client as mqtt
 from ctypes.util import find_library
 
+# --- 1. CRYPTO LIB ---
 def load_crypto():
     lib = ctypes.util.find_library('sodium') or ctypes.util.find_library('libsodium')
-    if not lib:
-        lib = ctypes.util.find_library('libsodium.dll') or ctypes.util.find_library('libsodium.so')
-    return ctypes.cdll.LoadLibrary(lib)
+    if not lib: 
+        # Fallback for Windows
+        lib = ctypes.util.find_library('libsodium.dll')
+    return ctypes.cdll.LoadLibrary(lib) if lib else None
 
 _sodium = load_crypto()
 
@@ -34,6 +34,7 @@ def to_cesr(raw_bytes, code="0B"):
     b64 = base64.urlsafe_b64encode(raw_bytes).decode('utf-8').rstrip('=')
     return f"{code}{b64}"
 
+# --- 2. KERI IDENTITY ---
 class KeriController:
     def __init__(self, alias):
         self.alias = alias
@@ -47,9 +48,9 @@ class KeriController:
                 self.pk = bytes.fromhex(data["pk"])
                 self.sk = bytes.fromhex(data["sk"])
                 self.aid = data["aid"]
-                print(f"[{self.alias}] 💾 Loaded Identity: {self.aid}")
+                print(f"[{self.alias}] 💾 Identity Loaded: {self.aid}")
         else:
-            print(f"[{self.alias}] ⚙️ Generating New KERI Identity...")
+            print(f"[{self.alias}] ⚙️ Provisioning Identity...")
             self.pk, self.sk = generate_keypair()
             self.aid = to_cesr(self.pk, code="D")
             with open(self.keystore, "w") as f:
@@ -67,6 +68,11 @@ class KeriController:
         sig_raw = sign_data(payload, self.sk)
         return {"type": "telemetry", "payload": payload, "sig": to_cesr(sig_raw, "0B")}
 
+# --- 3. SHARED PHYSICS STATE ---
+SYSTEM_LOCKDOWN = False
+HVAC_RUNNING = True  
+HVAC_SETPOINT = 22.0
+
 class VirtualDevice:
     def __init__(self, name, device_type):
         self.name = name
@@ -76,31 +82,45 @@ class VirtualDevice:
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.sn = 0
-        self.breaker_open = False # Actuator State
+        
+        # Initial Physics State
+        self.cpu_load = 30.0 
+        self.temp = 35.0     
+        self.fan_rpm = 4000
 
     def on_connect(self, client, userdata, flags, rc, properties=None):
-        # LISTEN FOR COMMANDS FROM GATEWAY
         client.subscribe("control/broadcast")
 
     def on_message(self, client, userdata, msg):
+        global SYSTEM_LOCKDOWN, HVAC_RUNNING
         try:
             payload = json.loads(msg.payload.decode())
             if "cmd" in payload:
                 cmd = payload["cmd"]
-                print(f"[{self.name}] ⚡ RECEIVED COMMAND: {cmd}")
-                if cmd == "OPEN_BREAKER":
-                    self.breaker_open = True
-                    print(f"[{self.name}] 🚨 EMERGENCY SHUTDOWN INITIATED!")
+                
+                # --- COMMAND: LOCKDOWN (Kill Switch) ---
+                if cmd == "OPEN_BREAKER": 
+                    if not SYSTEM_LOCKDOWN:
+                        print(f"\n[{self.name}] 🛡️ COMMAND RECEIVED: INITIATING LOCKDOWN (Shedding Load)\n")
+                        SYSTEM_LOCKDOWN = True
+                        if self.device_type == "HVAC": HVAC_RUNNING = True 
+
+                # --- COMMAND: RESTORE (Reset) ---
                 elif cmd == "CLOSE_BREAKER":
-                    self.breaker_open = False
-                    print(f"[{self.name}] ✅ SYSTEM RESTORED.")
+                    if SYSTEM_LOCKDOWN:
+                        print(f"\n[{self.name}] 🔄 COMMAND RECEIVED: RESTORING OPERATIONS\n")
+                        SYSTEM_LOCKDOWN = False
+                        if self.device_type == "HVAC": HVAC_RUNNING = True
         except: pass
 
     def start(self):
+        # FIX: Declare Globals HERE so they apply to the whole function
+        global HVAC_RUNNING, SYSTEM_LOCKDOWN
+        
         self.client.connect("localhost", 1883, 60)
         self.client.loop_start()
-
-        # Bootstrap
+        
+        # KERI BOOTSTRAP
         event, sig = self.keri.make_inception_event()
         self.client.publish("keri/bootstrap", json.dumps({"type": "icp", "event": event, "sig": sig}), qos=2)
         time.sleep(2)
@@ -108,35 +128,89 @@ class VirtualDevice:
         while True:
             self.sn += 1
             payload_val = ""
-
-            if self.device_type == "TEMP":
-                if self.breaker_open: val = 0.0 # Shutdown
-                else: val = round(22.0 + random.uniform(-0.5, 0.5), 2)
+            
+            # === PHYSICS ENGINE ===
+            
+            if self.device_type == "SERVER":
+                # 1. Determine Load
+                if SYSTEM_LOCKDOWN:
+                    target_load = 5.0 # Idle state
+                else:
+                    target_load = 65.0 # Normal heavy banking load
                 
-                # Attack Sim
-                if self.sn % 20 == 0: 
-                    print(f"[{self.name}] 😈 SIMULATING ATTACK...")
-                    packet = self.keri.sign_telemetry(val, 5) # Old SN
+                # Smooth transition
+                if self.cpu_load < target_load: self.cpu_load += 5
+                elif self.cpu_load > target_load: self.cpu_load -= 5
+                
+                self.cpu_load += random.uniform(-2, 2)
+                self.cpu_load = max(0, min(100, self.cpu_load))
+
+                # 2. Heat Generation
+                heat_gen = (self.cpu_load / 100.0) * 1.5 
+
+                # 3. Cooling
+                if HVAC_RUNNING:
+                    cooling_power = (self.temp - 20.0) * 0.05 
+                else:
+                    cooling_power = (self.temp - 20.0) * 0.005 
+
+                # 4. Apply Physics
+                self.temp = self.temp + heat_gen - cooling_power
+                self.temp = max(20.0, self.temp)
+
+                payload_val = f"CPU:{int(self.cpu_load)}%|Temp:{round(self.temp, 1)}C"
+
+            elif self.device_type == "HVAC":
+                # Attack Logic: Every 25 ticks
+                is_attack = (self.sn > 20 and self.sn % 25 < 10) 
+                
+                if SYSTEM_LOCKDOWN:
+                    HVAC_RUNNING = True
+                    self.fan_rpm = 8000 
+                    
+                elif is_attack:
+                    HVAC_RUNNING = False 
+                    self.fan_rpm = 0 
+                    print(f"[{self.name}] 😈 ATTACK: COOLING DISABLED (Spoofing Normal)...")
+                    
+                    fake_payload = "FAN:5000RPM|PWR:Normal"
+                    packet = self.keri.sign_telemetry(fake_payload, 5) 
                     self.client.publish(f"telemetry/{self.name}", json.dumps(packet))
                     time.sleep(3)
                     continue 
-                payload_val = f"{val}C"
+                    
+                else:
+                    HVAC_RUNNING = True
+                    self.fan_rpm = int(4500 + random.uniform(-100, 100))
 
-            elif self.device_type == "PDU":
-                if self.breaker_open: val = 0.0
-                else: val = round(230.0 + random.uniform(-1, 1), 1)
-                payload_val = f"{val}V"
+                payload_val = f"FAN:{self.fan_rpm}RPM|PWR:Active"
 
             elif self.device_type == "DOOR":
-                payload_val = "OPEN" if self.breaker_open else "CLOSED"
+                if SYSTEM_LOCKDOWN:
+                    state = "LOCKED" 
+                elif self.temp > 85.0:
+                    state = "UNLOCKED" # Fire Risk!
+                else:
+                    state = "LOCKED"
+                    
+                payload_val = f"{state}|Log:Secure"
 
+            # SEND DATA
             packet = self.keri.sign_telemetry(payload_val, self.sn)
             self.client.publish(f"telemetry/{self.name}", json.dumps(packet))
-            print(f"[{self.name}] 📤 {payload_val} | sn:{self.sn}")
+            
+            # Console Status
+            status = "❄️" if HVAC_RUNNING else "🔥"
+            if self.device_type == "SERVER":
+                print(f"[{self.name}] {status} Temp:{round(self.temp,1)}C | Load:{int(self.cpu_load)}%")
+            else:
+                print(f"[{self.name}] 📤 {payload_val} | sn:{self.sn}")
+            
             time.sleep(3)
 
 if __name__ == "__main__":
-    t1 = threading.Thread(target=VirtualDevice("DC-TEMP-01", "TEMP").start)
-    t2 = threading.Thread(target=VirtualDevice("DC-PDU-A", "PDU").start)
-    t3 = threading.Thread(target=VirtualDevice("DC-ACCESS-GATE", "DOOR").start)
+    print("--- 🏢 STARTING FORTRESS-1 PHYSICS SIMULATION ---")
+    t1 = threading.Thread(target=VirtualDevice("RACK-99-CORE", "SERVER").start)
+    t2 = threading.Thread(target=VirtualDevice("HVAC-MASTER", "HVAC").start)
+    t3 = threading.Thread(target=VirtualDevice("BIO-MANTRAP", "DOOR").start)
     t1.start(); t2.start(); t3.start()

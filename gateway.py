@@ -11,10 +11,9 @@ from dotenv import load_dotenv, find_dotenv
 from web3 import Web3
 
 # --- 1. ROBUST ENV LOADING ---
-print("🔍 Looking for .env file...")
+print(" Looking for .env file...")
 dotenv_path = find_dotenv(usecwd=True)
 if not dotenv_path:
-    # Fallback: Try looking up 2-3 levels
     for p in ["../../.env", "../../../.env", "../../../../.env", ".env"]:
         path = os.path.abspath(os.path.join(os.path.dirname(__file__), p))
         if os.path.exists(path):
@@ -22,10 +21,10 @@ if not dotenv_path:
             break
 
 if dotenv_path:
-    print(f"✅ Loaded .env from: {dotenv_path}")
+    print(f" Loaded .env from: {dotenv_path}")
     load_dotenv(dotenv_path)
 else:
-    print("❌ CRITICAL: .env file NOT FOUND. Web3 will fail.")
+    print(" CRITICAL: .env file NOT FOUND. Web3 will fail.")
 
 # --- 2. CONFIG ---
 MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
@@ -86,15 +85,15 @@ class SecureGateway:
             try:
                 self.w3 = Web3(Web3.HTTPProvider(RPC_URL))
                 if self.w3.is_connected():
-                    logging.info(f"✅ Connected to Blockchain: {CONTRACT_ADDRESS}")
+                    logging.info(f" Connected to Blockchain: {CONTRACT_ADDRESS}")
                     self.contract = self.w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
                     self.account = self.w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
                 else:
-                    logging.error("❌ Blockchain Connection Failed (Is Hardhat Running?)")
+                    logging.error(" Blockchain Connection Failed (Is Hardhat Running?)")
             except Exception as e:
                 logging.error(f"Web3 Init Error: {e}")
         else:
-            logging.warning("⚠️  Running WITHOUT Blockchain (Missing .env keys)")
+            logging.warning(" Running WITHOUT Blockchain (Missing .env keys)")
 
         # MQTT Setup
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="Gateway")
@@ -116,7 +115,7 @@ class SecureGateway:
             logging.error(f"TX Failed: {e}")
 
     def start(self):
-        logging.info("🛡️  GATEWAY ONLINE. Listening on MQTT...")
+        logging.info("  GATEWAY ONLINE. Listening on MQTT...")
         self.client.connect(MQTT_BROKER, 1883, 60)
         self.client.loop_forever()
 
@@ -141,7 +140,7 @@ class SecureGateway:
             if "cmd" in payload:
                 logging.info(f"Received Command: {payload['cmd']}")
                 if self.verify_scada_command(payload):
-                    logging.info(f"✅ COMMAND VERIFIED. Forwarding...")
+                    logging.info(f" COMMAND VERIFIED. Forwarding...")
                     self.client.publish("control/broadcast", json.dumps(payload))
                 return
 
@@ -164,31 +163,45 @@ class SecureGateway:
         raw_event = json.dumps(event, sort_keys=True)
         
         if verify_ed25519(pk_raw, raw_event, sig_raw):
-            logging.info(f"✅ INCEPTION VALIDATED: {aid}")
+            logging.info(f" INCEPTION VALIDATED: {aid}")
             self.kel_registry[aid] = {"pk": pk_raw, "last_sn": 0}
             if self.w3: self.send_tx(self.contract.functions.authorizeDevice(aid))
 
     def handle_telemetry(self, packet):
-        payload = packet["payload"]
+        payload = packet["payload"] # Format: AID|Data|Data...|SN|TS
         parts = payload.split("|")
-        aid, val, sn = parts[0], parts[1], int(parts[2])
+        
+        # --- FIXED PARSING LOGIC ---
+        # We know SN is always second to last, and TS is last.
+        # AID is first. Everything in between is "val".
+        if len(parts) < 3: return
+
+        aid = parts[0]
+        try:
+            sn = int(parts[-2]) # Grab SN from the end
+        except ValueError:
+            logging.error(f"Failed to parse SN from: {parts}")
+            return
+
+        # Reassemble the data part (it might contain | symbols)
+        val = "|".join(parts[1:-2]) 
         
         if aid not in self.kel_registry: return
         device = self.kel_registry[aid]
 
         if sn <= device["last_sn"]:
-            logging.warning(f"⚠️ REPLAY BLOCKED: {aid[:8]} (SN {sn})")
+            logging.warning(f" REPLAY BLOCKED: {aid[:8]} (SN {sn})")
             return
 
         if verify_ed25519(device["pk"], payload, from_cesr_sig(packet["sig"])):
-            logging.info(f"✅ DATA VERIFIED: {val} | Anchoring...")
+            logging.info(f" DATA VERIFIED: {val} | Anchoring...")
             device["last_sn"] = sn
             self.update_dashboard(aid, val, sn, "VERIFIED")
             if self.w3:
                 h = hashlib.sha256(payload.encode()).hexdigest()
                 self.send_tx(self.contract.functions.registerAnchor(aid, sn, h))
         else:
-            logging.warning(f"❌ INVALID SIG from {aid}")
+            logging.warning(f" INVALID SIG from {aid}")
 
     def update_dashboard(self, aid, val, sn, status):
         db_file = "dashboard_data.json"
@@ -200,8 +213,7 @@ class SecureGateway:
         data[aid] = {"val": val, "sn": sn, "status": status, "ts": time.time()}
         with open(db_file, "w") as f: json.dump(data, f)
 
-# === THE CRITICAL PART ===
 if __name__ == "__main__":
-    print("🚀 Starting Gateway Instance...")
+    print(" Starting Gateway Instance...")
     gw = SecureGateway()
     gw.start()
