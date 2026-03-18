@@ -2,28 +2,29 @@ import time
 import json
 import random
 import os
-<<<<<<< Updated upstream
 import ctypes
-=======
-import sys
-import ctypes
-import hashlib
->>>>>>> Stashed changes
 import base64
 import threading
 import paho.mqtt.client as mqtt
-from ctypes.util import find_library
 
-<<<<<<< Updated upstream
 # --- 1. CRYPTO LIB ---
+from scripts.utils import load_libsodium
+load_libsodium() # Injects keri-env/Scripts/ into the Windows DLL search path
+
 def load_crypto():
-    lib = ctypes.util.find_library('sodium') or ctypes.util.find_library('libsodium')
-    if not lib: 
-        # Fallback for Windows
-        lib = ctypes.util.find_library('libsodium.dll')
-    return ctypes.cdll.LoadLibrary(lib) if lib else None
+    try:
+        # Load directly now that the path is resolved
+        return ctypes.cdll.LoadLibrary('libsodium.dll')
+    except OSError:
+        from ctypes.util import find_library
+        lib = find_library('sodium') or find_library('libsodium')
+        return ctypes.cdll.LoadLibrary(lib) if lib else None
 
 _sodium = load_crypto()
+
+if _sodium is None:
+    print("CRITICAL: Libsodium failed to load. Check keri-env/Scripts/libsodium.dll")
+    os._exit(1)
 
 def generate_keypair():
     pk = ctypes.create_string_buffer(32)
@@ -31,16 +32,6 @@ def generate_keypair():
     _sodium.crypto_sign_keypair(pk, sk)
     return pk.raw, sk.raw
 
-=======
-# --- CRYPTO HELPERS ---
-def load_crypto():
-    lib = ctypes.util.find_library('sodium') or ctypes.util.find_library('libsodium')
-    if not lib: lib = ctypes.util.find_library('libsodium.dll') or ctypes.util.find_library('libsodium.so')
-    return ctypes.cdll.LoadLibrary(lib)
-
-_sodium = load_crypto()
-
->>>>>>> Stashed changes
 def sign_data(msg, sk):
     sig = ctypes.create_string_buffer(64)
     msg_bytes = msg.encode('utf-8')
@@ -51,17 +42,13 @@ def to_cesr(raw_bytes, code="0B"):
     b64 = base64.urlsafe_b64encode(raw_bytes).decode('utf-8').rstrip('=')
     return f"{code}{b64}"
 
-<<<<<<< Updated upstream
 # --- 2. KERI IDENTITY ---
-=======
->>>>>>> Stashed changes
 class KeriController:
     def __init__(self, alias):
         self.alias = alias
         self.keystore = f"{alias}_keystore.json"
-        self.load_or_create()
+        self.load_or_create_identity()
 
-<<<<<<< Updated upstream
     def load_or_create_identity(self):
         if os.path.exists(self.keystore):
             with open(self.keystore, "r") as f:
@@ -93,40 +80,12 @@ class KeriController:
 SYSTEM_LOCKDOWN = False
 HVAC_RUNNING = True  
 HVAC_SETPOINT = 22.0
-=======
-    def load_or_create(self):
-        if os.path.exists(self.keystore):
-            with open(self.keystore, "r") as f:
-                d = json.load(f)
-                self.pk, self.sk, self.aid = bytes.fromhex(d["pk"]), bytes.fromhex(d["sk"]), d["aid"]
-        else:
-            pk = ctypes.create_string_buffer(32); sk = ctypes.create_string_buffer(64)
-            _sodium.crypto_sign_keypair(pk, sk)
-            self.pk, self.sk = pk.raw, sk.raw
-            self.aid = to_cesr(self.pk, "D")
-            with open(self.keystore, "w") as f:
-                json.dump({"pk": self.pk.hex(), "sk": self.sk.hex(), "aid": self.aid}, f)
-
-    def make_inception(self):
-        event = {"v": "KERI10JSON000000", "t": "icp", "i": self.aid, "s": "0", "k": [to_cesr(self.pk, "D")]}
-        sig = to_cesr(sign_data(json.dumps(event, sort_keys=True), self.sk), "0B")
-        return event, sig
-
-    def sign_telemetry(self, val, sn):
-        payload = f"{self.aid}|{val}|{sn}|{time.time()}"
-        return {"type": "telemetry", "payload": payload, "sig": to_cesr(sign_data(payload, self.sk), "0B")}
-
-# --- GLOBAL STATE ---
-SYSTEM_LOCKDOWN = False
-HVAC_RUNNING = True
->>>>>>> Stashed changes
 
 class VirtualDevice:
     def __init__(self, name, device_type):
         self.name, self.device_type = name, device_type
         self.keri = KeriController(name)
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=name)
-<<<<<<< Updated upstream
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.sn = 0
@@ -138,10 +97,6 @@ class VirtualDevice:
 
     def on_connect(self, client, userdata, flags, rc, properties=None):
         client.subscribe("control/broadcast")
-=======
-        self.client.on_message = self.on_message
-        self.sn, self.temp = 0, 35.0
->>>>>>> Stashed changes
 
     def on_message(self, client, userdata, msg):
         global SYSTEM_LOCKDOWN, HVAC_RUNNING
@@ -149,7 +104,6 @@ class VirtualDevice:
             payload = json.loads(msg.payload.decode())
             if "cmd" in payload:
                 cmd = payload["cmd"]
-<<<<<<< Updated upstream
                 
                 # --- COMMAND: LOCKDOWN (Kill Switch) ---
                 if cmd == "OPEN_BREAKER": 
@@ -167,24 +121,12 @@ class VirtualDevice:
         except: pass
 
     def start(self):
-        # FIX: Declare Globals HERE so they apply to the whole function
         global HVAC_RUNNING, SYSTEM_LOCKDOWN
         
-=======
-                print(f"[{self.name}] Executing: {cmd}")
-                if cmd == "OPEN_DOOR": self.temp = 25.0  # Reset temp/unlock
-                elif cmd == "OPEN_BREAKER": SYSTEM_LOCKDOWN = True
-                elif cmd == "CLOSE_BREAKER": SYSTEM_LOCKDOWN = False
-        except: pass
-
-    def start(self):
-        global HVAC_RUNNING, SYSTEM_LOCKDOWN
->>>>>>> Stashed changes
         self.client.connect("localhost", 1883, 60)
         self.client.subscribe("control/broadcast")
         self.client.loop_start()
         
-<<<<<<< Updated upstream
         # KERI BOOTSTRAP
         event, sig = self.keri.make_inception_event()
         self.client.publish("keri/bootstrap", json.dumps({"type": "icp", "event": event, "sig": sig}), qos=2)
@@ -278,33 +220,4 @@ if __name__ == "__main__":
     t1 = threading.Thread(target=VirtualDevice("RACK-99-CORE", "SERVER").start)
     t2 = threading.Thread(target=VirtualDevice("HVAC-MASTER", "HVAC").start)
     t3 = threading.Thread(target=VirtualDevice("BIO-MANTRAP", "DOOR").start)
-=======
-        event, sig = self.keri.make_inception()
-        self.client.publish("keri/bootstrap", json.dumps({"event": event, "sig": sig}), qos=2)
-        time.sleep(1)
-
-        while True:
-            self.sn += 1
-            if self.device_type == "SERVER":
-                load = 5.0 if SYSTEM_LOCKDOWN else 65.0
-                heat = (load * 0.02)
-                cool = (self.temp - 20) * (0.05 if HVAC_RUNNING else 0.005)
-                self.temp = max(20.0, self.temp + heat - cool)
-                payload = f"CPU:{int(load)}%|Temp:{round(self.temp, 1)}C"
-            elif self.device_type == "HVAC":
-                payload = "FAN:4500RPM|PWR:Active" if HVAC_RUNNING else "FAN:0RPM|PWR:OFF"
-            elif self.device_type == "DOOR":
-                state = "UNLOCKED" if self.temp > 90.0 else "LOCKED"
-                payload = f"{state}|Log:Secure"
-
-            packet = self.keri.sign_telemetry(payload, self.sn)
-            self.client.publish(f"telemetry/{self.name}", json.dumps(packet))
-            print(f"[{self.name}] Sent: {payload}")
-            time.sleep(3)
-
-if __name__ == "__main__":
-    t1 = threading.Thread(target=VirtualDevice("RACK-99", "SERVER").start)
-    t2 = threading.Thread(target=VirtualDevice("HVAC-01", "HVAC").start)
-    t3 = threading.Thread(target=VirtualDevice("DOOR-01", "DOOR").start)
->>>>>>> Stashed changes
     t1.start(); t2.start(); t3.start()
